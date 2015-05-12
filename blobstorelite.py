@@ -22,17 +22,18 @@ import os
 # TODO: Make zipping of blob optional
 
 # TODO: For small blobs, perhaps cheaper to append to one file, similar to sqlite.
+# TODO: Support for multiple symbolic names, rather than a single one.
 
 # Pickle and then compress
 def pickle_and_save(path, data): # 4 x smaller using compressed
 	compressed = zlib.compress(pickle.dumps(data))	
-	with open(path + "queue", "wb") as fw: # Over write the file each time
+	with open(path + "lookup", "wb") as fw: # Over write the file each time
 		fw.write(compressed)
 
 # uncompress, then depickle
 def read_and_depickle(path):
 	try:
-		with open(path + "queue", "rb") as fr:
+		with open(path + "lookup", "rb") as fr:
 			return pickle.loads(zlib.decompress(fr.read()))
 	except:
 		return {}
@@ -46,8 +47,9 @@ class BlobStoreLite:
 		self.path = default_path
 		obj = read_and_depickle(self.path)
 		self.max_docs = obj.get('max_docs', default_max_docs)
-		self.head_ptr = obj.get('head_ptr', -1)
-		self.queue = obj.get('queue', [])
+		self.head_ptr = obj.get('head_ptr', -1) # Pointer to last entry in queue
+		self.queue = obj.get('queue', []) # ID of blobs, associated meta data, and symbolic name reference
+		self.sym_names = obj.get('sym_names', {}) # Dictionary mapping symbolic names to id
 
 	def increment_index(self, index):
 		return (index + 1) % self.max_docs
@@ -61,6 +63,7 @@ class BlobStoreLite:
 				'max_docs': self.max_docs,
 				'head_ptr': self.head_ptr,
 				'queue': self.queue,
+				'sym_names': self.sym_names,
 				}
 		pickle_and_save(self.path, obj)
 
@@ -72,21 +75,36 @@ class BlobStoreLite:
 
 	def read_file(self, index):
 		with open(self.get_folder(index) + "/" + str(index), "rb") as fr:
-			return (zlib.decompress(fr.read()), self.queue[index]) # Return the document and meta
+			return (zlib.decompress(fr.read()), self.queue[index][0], self.queue[index][1]) # Return the document and meta
 
-	def add(self, document, meta = {}):
+	# If the name exists, remove previous sym link 
+	def add(self, document = None, name = None, meta = {}):
 		if type(document) == str:
 			self.head_ptr = self.increment_index(self.head_ptr) # Increment the pointer in the circular queue
 
+			# If the name was used before, remove the old reference
+			if type(name) == str and name in self.sym_names:
+				index = self.sym_names[name]
+				entry = (None, self.queue[index][1])
+				self.queue[index] = entry
+
+			entry = (name, meta)
+
 			if len(self.queue) < self.max_docs: # Grow the list
-				self.queue.append(meta)
-			else:  
-				self.queue[self.head_ptr] = meta
+				self.queue.append(entry)
+			else:
+				self.sym_names.pop(self.queue[self.head_ptr][0], None) # Remove the old sym name, since circling back on the queue
+				self.queue[self.head_ptr] = entry
+
+			# Update the entry in symbolic lookup
+			if type(name) == str:
+				self.sym_names[name] = self.head_ptr
 
 			with open(self.get_folder(self.head_ptr) + "/" + str(self.head_ptr), "wb") as fw: # Over write the file each time
 				fw.write(zlib.compress(document))
 
 			
+
 			# TODO: don't save for every write.
 			self.save()
 		else:
@@ -96,9 +114,15 @@ class BlobStoreLite:
 		# Add the missing files to the queue.
 
 	# document, meta  = get()
-	# if index = -1, gets the head document
-	def get(self, index = -1):
-		index = self.head_ptr if index == -1 else index
+	# if key = -1, gets the head document
+	def get(self, key = -1):
+		if type(key) == str:
+			if key in self.sym_names:
+				index = self.sym_names[key]
+			else:
+				return (None, key, None) # Expired. Object no longer exists
+		else:
+			index = self.head_ptr if key == -1 else key
 		return self.read_file(index)
 
 	# start from head, work backwards
@@ -117,14 +141,16 @@ class BlobStoreLite:
 
 
 d = BlobStoreLite()
-d.add("the little dog")
+d.add("the little dog", name = "fido")
 d.add("asdfadsf;fj")
-d.add("asdff;fj","extra meta data")
-d.add("more dogs", {'dic':'meta'})
+d.add("asdff;fj",meta="extra meta data")
+d.add("more dogs", meta={'dic':'meta'})
 
-doc, meta = d.get()
+doc, name, meta = d.get()
 print doc
 
+doc, name, meta = d.get('fido')
+print doc + " | name:" +  name
 
-for doc, meta in d:
+for doc, name, meta in d:
 	print doc
